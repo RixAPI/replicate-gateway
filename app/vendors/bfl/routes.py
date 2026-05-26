@@ -44,6 +44,23 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/bfl/v1", tags=["BFL"], dependencies=[Depends(verify_auth)])
 
+# Marker suffix appended to task ids exposed to the caller. Lets us recognise
+# that an id was created by *this* proxy without breaking BFL clients that
+# treat the id as opaque.
+_ID_SUFFIX = "-od9su3"
+
+
+def _expose_id(prediction_id: str) -> str:
+    """Append the proxy marker to an upstream prediction id."""
+    return prediction_id + _ID_SUFFIX
+
+
+def _unwrap_id(task_id: str) -> str:
+    """Strip the proxy marker from a caller-provided task id, if present."""
+    if task_id.endswith(_ID_SUFFIX):
+        return task_id[: -len(_ID_SUFFIX)]
+    return task_id
+
 _PIXELS_PER_MP = 1024.0 * 1024.0
 _MAX_FETCH_BYTES = 1024 * 1024  # 1 MB, same as the Go gateway
 
@@ -230,7 +247,7 @@ async def create_task(model: str, request: Request):
         logger.exception("Unexpected error calling Replicate for BFL model %s", model)
         raise HTTPException(502, detail="Upstream model provider returned an error") from exc
 
-    resp = BFLTaskCreated(id=prediction["id"])
+    resp = BFLTaskCreated(id=_expose_id(prediction["id"]))
     if model in MODEL_PRICING:
         cost, in_mp, out_mp = calculate_image_cost(
             model, raw_input, total_input_mp, ref_w, ref_h, num_images,
@@ -248,11 +265,12 @@ async def get_result(request: Request):
     if not task_id:
         raise HTTPException(400, detail="Missing task ID parameter")
 
+    upstream_id = _unwrap_id(task_id)
     token = extract_token(request)
     client = request.app.state.replicate_client
 
     try:
-        prediction = await client.get_prediction(token, task_id)
+        prediction = await client.get_prediction(token, upstream_id)
     except UpstreamError as exc:
         if exc.status_code == 404:
             raise HTTPException(404, detail="Task not found") from exc
@@ -261,7 +279,7 @@ async def get_result(request: Request):
             detail=exc.detail,
         ) from exc
     except Exception:
-        logger.exception("Failed to fetch prediction %s", task_id)
+        logger.exception("Failed to fetch prediction %s", upstream_id)
         raise HTTPException(502, detail="Upstream model provider returned an error")
 
     status = prediction.get("status")
