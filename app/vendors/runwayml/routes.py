@@ -210,7 +210,7 @@ async def _create_task(
             # it for "task not found" on a yet-to-be-created task.
             raise HTTPException(502, detail=f"Upstream model not reachable: {detail}") from exc
         if sc == 422:
-            raise HTTPException(400, detail=f"Invalid request parameters: {detail}") from exc
+            raise HTTPException(422, detail=f"Invalid request parameters: {detail}") from exc
         if sc == 429:
             raise HTTPException(429, detail="Rate limit exceeded") from exc
         if 400 <= sc < 500:

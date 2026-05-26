@@ -120,7 +120,7 @@ async def handle_predict_long_running(
             return gemini_error_response(401, "Invalid API key", "UNAUTHENTICATED")
         if sc == 422:
             return gemini_error_response(
-                400, f"Invalid request parameters: {resp_body}", "INVALID_ARGUMENT",
+                422, f"Invalid request parameters: {resp_body}", "INVALID_ARGUMENT",
             )
         if sc == 429:
             return gemini_error_response(429, "Rate limit exceeded", "RESOURCE_EXHAUSTED")
