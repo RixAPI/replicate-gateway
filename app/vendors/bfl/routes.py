@@ -247,7 +247,8 @@ async def create_task(model: str, request: Request):
         logger.exception("Unexpected error calling Replicate for BFL model %s", model)
         raise HTTPException(502, detail="Upstream model provider returned an error") from exc
 
-    resp = BFLTaskCreated(id=_expose_id(prediction["id"]))
+    exposed_id = _expose_id(prediction["id"])
+    resp = BFLTaskCreated(id=exposed_id)
     if model in MODEL_PRICING:
         cost, in_mp, out_mp = calculate_image_cost(
             model, raw_input, total_input_mp, ref_w, ref_h, num_images,
@@ -273,7 +274,13 @@ async def get_result(request: Request):
         prediction = await client.get_prediction(token, upstream_id)
     except UpstreamError as exc:
         if exc.status_code == 404:
-            raise HTTPException(404, detail="Task not found") from exc
+            # BFL convention: surface the missing-task state inside the body,
+            # not as an HTTP 404, so clients can keep polling with one code path.
+            return BFLTaskResult(
+                id=task_id, status="Task not found",
+            ).model_dump(exclude_none=True)
+        if exc.status_code in (401, 403):
+            raise HTTPException(401, detail="Invalid API token") from exc
         raise HTTPException(
             exc.status_code if 400 <= exc.status_code < 500 else 502,
             detail=exc.detail,
@@ -304,10 +311,44 @@ async def get_result(request: Request):
         )
         return result.model_dump(exclude_none=False)
 
-    if status == "failed":
-        return BFLTaskResult(id=task_id, status="Error").model_dump(exclude_none=True)
+    if status in ("failed", "canceled"):
+        err_msg = prediction.get("error")
+        if isinstance(err_msg, dict):
+            err_msg = err_msg.get("message") or json.dumps(err_msg, ensure_ascii=False)
+        elif err_msg is None:
+            err_msg = (
+                "Prediction was canceled" if status == "canceled" else "Prediction failed"
+            )
+        else:
+            err_msg = str(err_msg)
 
+        bfl_status = _classify_failure(err_msg)
+        logger.info("BFL task %s → %s | upstream=%s | details=%s",
+                    task_id, bfl_status, status, err_msg[:200])
+        return BFLTaskResult(
+            id=task_id, status=bfl_status, details=err_msg,
+        ).model_dump(exclude_none=True)
+
+    # starting / processing / anything else → Pending
     return BFLTaskResult(id=task_id, status="Pending").model_dump(exclude_none=True)
+
+
+_MODERATION_HINTS = (
+    "nsfw",
+    "safety",
+    "moderation",
+    "moderated",
+    "content policy",
+    "flagged",
+)
+
+
+def _classify_failure(error_msg: str) -> str:
+    """Map an upstream error message to a BFL-flavoured failure status."""
+    lowered = (error_msg or "").lower()
+    if any(h in lowered for h in _MODERATION_HINTS):
+        return "Content Moderated"
+    return "Error"
 
 
 def _extract_sample(output: Any) -> str:

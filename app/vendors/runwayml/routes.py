@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -28,6 +29,17 @@ from app.vendors.runwayml.param_converter import (
 logger = logging.getLogger(__name__)
 
 VENDOR = "runwayml"
+
+
+def _stringify_error(err: object) -> str:
+    """Coerce an upstream `error` field (str / dict / None / other) into a string."""
+    if err is None:
+        return ""
+    if isinstance(err, str):
+        return err
+    if isinstance(err, dict):
+        return err.get("message") or err.get("detail") or json.dumps(err, ensure_ascii=False)
+    return str(err)
 
 router = APIRouter(prefix="/runwayml/v1", tags=["RunwayML"], dependencies=[Depends(verify_auth)])
 
@@ -99,9 +111,19 @@ async def get_task(task_id: str, request: Request):
     try:
         prediction = await client.get_prediction(token, task["prediction_id"])
     except UpstreamError as exc:
-        logger.error("Replicate API error for prediction %s: %s", task["prediction_id"], exc.detail)
-        status = exc.status_code if 400 <= exc.status_code < 500 else 502
-        raise HTTPException(status, detail=exc.detail) from exc
+        detail = _stringify_error(exc.detail)
+        logger.error("Replicate API error for prediction %s: %s",
+                     task["prediction_id"], detail)
+        sc = exc.status_code
+        if sc in (401, 403):
+            raise HTTPException(401, detail="Invalid or unauthorized API token") from exc
+        if sc == 404:
+            # Upstream lost the prediction — surface as 404 since that's
+            # genuinely "task not found" at this point.
+            raise HTTPException(404, detail="Task not found") from exc
+        if 400 <= sc < 500:
+            raise HTTPException(sc, detail=detail) from exc
+        raise HTTPException(502, detail="Upstream model provider returned an error") from exc
     except Exception as exc:
         logger.exception("Failed to fetch prediction %s", task["prediction_id"])
         raise HTTPException(502, detail="Upstream model provider returned an error") from exc
@@ -121,8 +143,13 @@ async def get_task(task_id: str, request: Request):
     failure = None
     failure_code = None
     if status == "FAILED":
-        failure = prediction.get("error") or "Unknown error"
+        failure = _stringify_error(prediction.get("error")) or "Unknown error"
         failure_code = "INTERNAL_ERROR"
+    elif status == "CANCELLED":
+        # Surface a friendly message so the client can distinguish cancellation
+        # from a generic failure without inspecting upstream details.
+        failure = _stringify_error(prediction.get("error")) or "Task was cancelled"
+        failure_code = "CANCELLED"
 
     return TaskDetailResponse(
         id=task_id,
@@ -172,9 +199,23 @@ async def _create_task(
     try:
         prediction = await client.create_prediction(token, replicate_model, inp)
     except UpstreamError as exc:
-        logger.error("Replicate API error for model %s: %s", replicate_model, exc.detail)
-        status = exc.status_code if 400 <= exc.status_code < 500 else 502
-        raise HTTPException(status, detail=exc.detail) from exc
+        detail = _stringify_error(exc.detail)
+        logger.error("Replicate API error for model %s: %s", replicate_model, detail)
+        sc = exc.status_code
+        if sc in (401, 403):
+            raise HTTPException(401, detail="Invalid or unauthorized API token") from exc
+        if sc == 404:
+            # 404 on create means the (model, version) wasn't reachable upstream.
+            # Surface as 502 rather than a literal 404 so clients don't mistake
+            # it for "task not found" on a yet-to-be-created task.
+            raise HTTPException(502, detail=f"Upstream model not reachable: {detail}") from exc
+        if sc == 422:
+            raise HTTPException(400, detail=f"Invalid request parameters: {detail}") from exc
+        if sc == 429:
+            raise HTTPException(429, detail="Rate limit exceeded") from exc
+        if 400 <= sc < 500:
+            raise HTTPException(sc, detail=detail) from exc
+        raise HTTPException(502, detail="Upstream model provider returned an error") from exc
     except Exception as exc:
         logger.exception("Unexpected error calling Replicate for model %s", replicate_model)
         raise HTTPException(502, detail="Upstream model provider returned an error") from exc

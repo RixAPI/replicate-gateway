@@ -10,6 +10,7 @@ Lifecycle mirrors Google's official long-running operation flow:
 
 from __future__ import annotations
 
+import json
 import logging
 
 from fastapi import Request
@@ -38,6 +39,17 @@ logger = logging.getLogger(__name__)
 
 VENDOR = "gemini-veo"
 SUPPORTED = ", ".join(VEO_MODEL_MAP.keys())
+
+
+def _stringify_error(err: object) -> str:
+    """Coerce an upstream `error` field (str / dict / None / other) into a string."""
+    if err is None:
+        return ""
+    if isinstance(err, str):
+        return err
+    if isinstance(err, dict):
+        return err.get("message") or err.get("detail") or json.dumps(err, ensure_ascii=False)
+    return str(err)
 
 
 def _operation_name(model: str, task_id: str) -> str:
@@ -199,15 +211,20 @@ async def handle_get_operation(operation_name: str, request: Request):
         return op.model_dump(by_alias=True, exclude_none=True)
 
     if status in ("failed", "canceled"):
-        msg = prediction.get("error") or (
+        msg = _stringify_error(prediction.get("error")) or (
             "Prediction was canceled" if status == "canceled" else "Prediction failed"
         )
         op = Operation(
             name=op_name,
             done=True,
-            error=OperationError(code=13 if status == "failed" else 1, message=str(msg)),
+            error=OperationError(code=13 if status == "failed" else 1, message=msg),
         )
         return op.model_dump(by_alias=True, exclude_none=True)
 
-    # Unknown / future status — treat as still running.
+    # Unknown status — log it and treat as still running so the client keeps
+    # polling. If a new upstream status name appears we'll see it in the logs.
+    logger.warning(
+        "Veo prediction %s returned unknown status=%r — treating as in-progress",
+        task["prediction_id"], status,
+    )
     return Operation(name=op_name, done=False).model_dump(by_alias=True, exclude_none=True)

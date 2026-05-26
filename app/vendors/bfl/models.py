@@ -45,8 +45,10 @@ class BFLTaskResultPayload(BaseModel):
 class BFLTaskResult(BaseModel):
     """Response from GET /v1/get_result?id=...
 
-    ``status`` is BFL-flavoured: ``Pending`` / ``Ready`` / ``Error``.
+    ``status`` is BFL-flavoured: ``Pending`` / ``Ready`` / ``Error`` /
+    ``Task not found`` / ``Content Moderated``.
     ``result`` is only present when status == ``Ready``.
+    ``details`` carries upstream error info when status is a failure type.
     """
 
     model_config = ConfigDict(populate_by_name=True)
@@ -54,3 +56,4 @@ class BFLTaskResult(BaseModel):
     id: str
     status: str
     result: Optional[BFLTaskResultPayload] = None
+    details: Optional[str] = None
