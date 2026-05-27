@@ -122,6 +122,11 @@ def get_veo_replicate_model(gemini_model: str) -> str | None:
 
 
 def _instance_to_data_uri(inst: VeoInlineDataInstance) -> str:
+    if inst.gcs_uri and not inst.inline_data.data:
+        raise ValueError(
+            f"gcsUri inputs ({inst.gcs_uri}) are not supported by this proxy. "
+            "Provide image bytes via inlineData / bytesBase64Encoded instead."
+        )
     return _to_data_uri(inst.inline_data)
 
 

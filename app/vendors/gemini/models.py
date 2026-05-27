@@ -158,15 +158,22 @@ class VeoInlineDataInstance(BaseModel):
     Accepts both shapes Google uses across its two Veo APIs:
 
     * **Gemini Developer API**: ``{"inlineData": {"mimeType": "...", "data": "<b64>"}}``
-    * **Vertex AI**: ``{"bytesBase64Encoded": "<b64>", "mimeType": "..."}``
+    * **Vertex AI** (inline base64): ``{"bytesBase64Encoded": "<b64>", "mimeType": "..."}``
+    * **Vertex AI** (GCS URI): ``{"gcsUri": "gs://...", "mimeType": "..."}``
 
     The Vertex AI form is normalised into the Gemini Developer form before
     downstream code runs, so the rest of the pipeline only deals with one shape.
+
+    .. note::
+       ``gcsUri`` cannot be forwarded to Replicate as-is (Replicate doesn't
+       fetch ``gs://``). It is preserved on the model so the converter can
+       reject it with a clear error rather than silently dropping data.
     """
 
     model_config = ConfigDict(populate_by_name=True)
 
     inline_data: InlineData = Field(alias="inlineData")
+    gcs_uri: str | None = Field(default=None, alias="gcsUri")
 
     @model_validator(mode="before")
     @classmethod
@@ -175,11 +182,23 @@ class VeoInlineDataInstance(BaseModel):
             return data
         if "inlineData" in data or "inline_data" in data:
             return data
+        # Vertex AI inline base64 form
         b64 = data.get("bytesBase64Encoded") or data.get("bytes_base64_encoded")
-        if not b64:
-            return data
-        mime = data.get("mimeType") or data.get("mime_type") or "image/png"
-        return {"inlineData": {"mimeType": mime, "data": b64}}
+        if b64:
+            mime = data.get("mimeType") or data.get("mime_type") or "image/png"
+            out = {"inlineData": {"mimeType": mime, "data": b64}}
+            # Preserve gcsUri if also present (rare but possible)
+            if data.get("gcsUri") or data.get("gcs_uri"):
+                out["gcsUri"] = data.get("gcsUri") or data.get("gcs_uri")
+            return out
+        # Vertex AI GCS URI form (no inline data) — provide a placeholder
+        # InlineData so the model validates; converter will reject downstream.
+        if data.get("gcsUri") or data.get("gcs_uri"):
+            return {
+                "inlineData": {"mimeType": "application/x-gcs-uri", "data": ""},
+                "gcsUri": data.get("gcsUri") or data.get("gcs_uri"),
+            }
+        return data
 
 
 class VeoReferenceImage(BaseModel):
@@ -205,12 +224,34 @@ class VeoParameters(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     aspect_ratio: str | None = Field(default=None, alias="aspectRatio")
-    duration_seconds: str | None = Field(default=None, alias="durationSeconds")
+    # Gemini Developer API docs it as a string ("4"/"6"/"8") but Vertex AI
+    # passes an integer; accept either and let the converter normalise.
+    duration_seconds: str | int | None = Field(default=None, alias="durationSeconds")
     person_generation: str | None = Field(default=None, alias="personGeneration")
     resolution: str | None = None
+    # Gemini Developer API uses ``numberOfVideos``; Vertex AI uses
+    # ``sampleCount``. Both populate the same field via the alias machinery.
     number_of_videos: int | None = Field(default=None, alias="numberOfVideos")
     seed: int | None = None
     negative_prompt: str | None = Field(default=None, alias="negativePrompt")
+    # Vertex-AI-only extras — accepted but not forwarded (Replicate has no
+    # equivalent knob today). We surface them on the model so they don't get
+    # silently dropped during parsing.
+    enhance_prompt: bool | None = Field(default=None, alias="enhancePrompt")
+    generate_audio: bool | None = Field(default=None, alias="generateAudio")
+    storage_uri: str | None = Field(default=None, alias="storageUri")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_vertex_ai_sample_count(cls, data):
+        """Vertex AI's ``sampleCount`` is semantically equivalent to
+        Gemini Developer API's ``numberOfVideos``. Map it before validation."""
+        if not isinstance(data, dict):
+            return data
+        if "sampleCount" in data and "numberOfVideos" not in data and "number_of_videos" not in data:
+            data = dict(data)
+            data["numberOfVideos"] = data.pop("sampleCount")
+        return data
 
 
 class PredictLongRunningRequest(BaseModel):
