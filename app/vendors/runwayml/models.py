@@ -12,6 +12,8 @@ class RunwayModel(str, Enum):
     GEN4_5 = "gen4.5"
     GEN4_TURBO = "gen4_turbo"
     GEN4_ALEPH = "gen4_aleph"
+    GEN4_IMAGE = "gen4_image"
+    GEN4_IMAGE_TURBO = "gen4_image_turbo"
     ACT_TWO = "act_two"
 
 
@@ -59,6 +61,38 @@ class VideoToVideoRequest(BaseModel):
     ratio: Optional[str] = Field("1280:720", description="Output aspect ratio")
     duration: Optional[int] = Field(5, description="Duration in seconds")
     seed: Optional[int] = Field(None, description="Random seed")
+
+
+# ---------------------------------------------------------------------------
+# Request bodies – Text to Image (gen4_image / gen4_image_turbo)
+# ---------------------------------------------------------------------------
+
+
+class ContentModeration(BaseModel):
+    publicFigureThreshold: Optional[str] = Field(
+        "auto",
+        description="'auto' or 'low' (Runway content moderation knob)",
+    )
+
+
+class TextToImageRequest(BaseModel):
+    """Maps to RunwayML POST /v1/text_to_image."""
+
+    promptText: str = Field(..., max_length=1000, description="Text prompt")
+    model: str = Field(..., description="gen4_image | gen4_image_turbo")
+    ratio: str = Field(
+        ...,
+        description=(
+            "Output pixel ratio. Accepted values (per Runway docs): "
+            "1920:1080, 1080:1920, 1024:1024, 1360:768, 1080:1080, "
+            "1168:880, 1440:1080, 1080:1440, 1808:768, 2112:912"
+        ),
+    )
+    seed: Optional[int] = Field(None, description="Random seed (0..4294967295)")
+    referenceImages: Optional[list[ReferenceImage]] = Field(
+        None, description="Up to 3 reference images, each with optional tag"
+    )
+    contentModeration: Optional[ContentModeration] = None
 
 
 class CharacterInput(BaseModel):

@@ -15,11 +15,13 @@ from app.vendors.runwayml.models import (
     ImageToVideoRequest,
     TaskCreatedResponse,
     TaskDetailResponse,
+    TextToImageRequest,
     TextToVideoRequest,
     VideoToVideoRequest,
 )
 from app.vendors.runwayml.param_converter import (
     build_image_to_video_input,
+    build_text_to_image_input,
     build_text_to_video_input,
     build_video_to_video_input,
     convert_status,
@@ -84,6 +86,29 @@ async def video_to_video(body: VideoToVideoRequest, request: Request):
 
     inp = build_video_to_video_input(body)
     return await _create_task(request, replicate_model, inp, body.model, "video_to_video")
+
+
+@router.post(
+    "/text_to_image",
+    response_model=TaskCreatedResponse,
+    responses={400: {"model": ErrorResponse}, 502: {"model": ErrorResponse}},
+)
+async def text_to_image(body: TextToImageRequest, request: Request):
+    """gen4_image / gen4_image_turbo — Runway's reference-based image model."""
+    replicate_model = resolve_replicate_model(body.model)
+    if not replicate_model:
+        raise HTTPException(400, detail=f"Unsupported model: {body.model}")
+    if body.model not in ("gen4_image", "gen4_image_turbo"):
+        raise HTTPException(
+            400,
+            detail=f"Model {body.model!r} is not a text_to_image model. "
+            "Use 'gen4_image' or 'gen4_image_turbo'.",
+        )
+    if body.referenceImages and len(body.referenceImages) > 3:
+        raise HTTPException(400, detail="At most 3 referenceImages are allowed")
+
+    inp = build_text_to_image_input(body)
+    return await _create_task(request, replicate_model, inp, body.model, "text_to_image")
 
 
 @router.post("/character_performance")

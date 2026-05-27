@@ -6,6 +6,7 @@ from math import gcd
 
 from app.vendors.runwayml.models import (
     ImageToVideoRequest,
+    TextToImageRequest,
     TextToVideoRequest,
     VideoToVideoRequest,
 )
@@ -14,6 +15,8 @@ RUNWAY_TO_REPLICATE_MODEL: dict[str, str] = {
     "gen4.5": "runwayml/gen-4.5",
     "gen4_turbo": "runwayml/gen4-turbo",
     "gen4_aleph": "runwayml/gen4-aleph",
+    "gen4_image": "runwayml/gen4-image",
+    "gen4_image_turbo": "runwayml/gen4-image-turbo",
 }
 
 _RATIO_MAP: dict[str, str] = {
@@ -107,6 +110,76 @@ def build_video_to_video_input(req: VideoToVideoRequest) -> dict:
         inp["reference_image"] = req.referenceImages[0].uri
     if req.seed is not None:
         inp["seed"] = req.seed
+    return inp
+
+
+# ---------------------------------------------------------------------------
+# Text-to-Image ratio mapping (per Runway docs, 10 accepted pixel ratios)
+# ---------------------------------------------------------------------------
+
+# Each tuple is (aspect_ratio_simplified, resolution_label) the Replicate
+# gen4-image / gen4-image-turbo models accept.
+_IMAGE_RATIO_MAP: dict[str, tuple[str, str]] = {
+    "1920:1080": ("16:9", "1080p"),
+    "1080:1920": ("9:16", "1080p"),
+    "1024:1024": ("1:1",  "720p"),
+    "1360:768":  ("16:9", "720p"),
+    "1080:1080": ("1:1",  "1080p"),
+    "1168:880":  ("4:3",  "720p"),
+    "1440:1080": ("4:3",  "1080p"),
+    "1080:1440": ("3:4",  "1080p"),
+    "1808:768":  ("21:9", "720p"),
+    "2112:912":  ("21:9", "1080p"),
+}
+
+
+def convert_image_ratio(runway_ratio: str | None) -> tuple[str, str]:
+    """Convert a Runway pixel ratio to the Replicate (aspect_ratio, resolution) pair.
+
+    Falls back to the closest simplified ratio + 720p when the input isn't in
+    the documented enum.
+    """
+    if runway_ratio and runway_ratio in _IMAGE_RATIO_MAP:
+        return _IMAGE_RATIO_MAP[runway_ratio]
+    # Fallback: try parsing as W:H and infer resolution from the long edge.
+    ar = convert_ratio(runway_ratio)
+    long_edge = 0
+    if runway_ratio and ":" in runway_ratio:
+        try:
+            w, h = (int(x) for x in runway_ratio.split(":"))
+            long_edge = max(w, h)
+        except ValueError:
+            pass
+    resolution = "1080p" if long_edge >= 1900 else "720p"
+    return ar, resolution
+
+
+def build_text_to_image_input(req: TextToImageRequest) -> dict:
+    """Build the Replicate ``input`` payload for gen4-image / gen4-image-turbo.
+
+    Replicate uses ``reference_images`` (list of URLs) and a parallel
+    ``reference_tags`` (list of strings) — different from Runway's
+    object-of-{uri, tag}. We split the caller's payload accordingly.
+    """
+    aspect_ratio, resolution = convert_image_ratio(req.ratio)
+    inp: dict = {
+        "prompt": req.promptText,
+        "aspect_ratio": aspect_ratio,
+        "resolution": resolution,
+    }
+    if req.seed is not None:
+        inp["seed"] = req.seed
+    if req.referenceImages:
+        uris: list[str] = []
+        tags: list[str] = []
+        for ref in req.referenceImages[:3]:  # Replicate caps at 3
+            uris.append(ref.uri)
+            if ref.tag:
+                tags.append(ref.tag)
+        if uris:
+            inp["reference_images"] = uris
+        if tags and len(tags) == len(uris):
+            inp["reference_tags"] = tags
     return inp
 
 
