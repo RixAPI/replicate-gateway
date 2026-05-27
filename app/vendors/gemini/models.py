@@ -7,7 +7,7 @@ thanks to ``populate_by_name=True`` + aliases. Responses serialise with
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class InlineData(BaseModel):
@@ -153,11 +153,33 @@ class ErrorResponse(BaseModel):
 
 
 class VeoInlineDataInstance(BaseModel):
-    """Wrapper for ``instances[].image`` / ``.lastFrame`` / ``.video``."""
+    """Wrapper for ``instances[].image`` / ``.lastFrame`` / ``.video``.
+
+    Accepts both shapes Google uses across its two Veo APIs:
+
+    * **Gemini Developer API**: ``{"inlineData": {"mimeType": "...", "data": "<b64>"}}``
+    * **Vertex AI**: ``{"bytesBase64Encoded": "<b64>", "mimeType": "..."}``
+
+    The Vertex AI form is normalised into the Gemini Developer form before
+    downstream code runs, so the rest of the pipeline only deals with one shape.
+    """
 
     model_config = ConfigDict(populate_by_name=True)
 
     inline_data: InlineData = Field(alias="inlineData")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_vertex_ai_shape(cls, data):
+        if not isinstance(data, dict):
+            return data
+        if "inlineData" in data or "inline_data" in data:
+            return data
+        b64 = data.get("bytesBase64Encoded") or data.get("bytes_base64_encoded")
+        if not b64:
+            return data
+        mime = data.get("mimeType") or data.get("mime_type") or "image/png"
+        return {"inlineData": {"mimeType": mime, "data": b64}}
 
 
 class VeoReferenceImage(BaseModel):
